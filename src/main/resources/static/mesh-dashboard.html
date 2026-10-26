@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>UPI Offline Mesh — Dashboard</title>
+    <style>
+        body { font-family: -apple-system, Arial, sans-serif; background: #0f1117; color: #e6e6e6; margin: 0; padding: 24px; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        .sub { color: #888; margin-bottom: 20px; font-size: 13px; }
+        .panel { background: #1a1d27; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+        label { font-size: 12px; color: #aaa; display: block; margin-bottom: 3px; }
+        input { background: #0f1117; border: 1px solid #333; color: #eee; padding: 6px 8px; border-radius: 4px; width: 110px; }
+        button { background: #4f7dff; border: none; color: white; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+        button:hover { background: #6a92ff; }
+        #graph { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; }
+        .status { font-weight: bold; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+        .status.DELIVERED { background: #1e4d2b; color: #6fe08a; }
+        .status.DROPPED_NO_ROUTE, .status.DROPPED_TTL_EXPIRED { background: #4d1e1e; color: #ff8a8a; }
+        #result { font-size: 13px; line-height: 1.6; }
+        #nodeList { color: #888; font-size: 12px; margin-top: 8px; }
+    </style>
+</head>
+<body>
+
+<h1>UPI Offline Mesh — Dashboard</h1>
+<div class="sub">Day 6 — topology + relay visualization</div>
+
+<div class="panel">
+    <div class="row">
+        <div>
+            <label>Device count</label>
+            <input id="deviceCount" type="number" value="10">
+        </div>
+        <div>
+            <label>Avg connections</label>
+            <input id="avgConnections" type="number" value="3">
+        </div>
+        <button onclick="buildTopology()">Build Topology</button>
+    </div>
+    <div id="nodeList"></div>
+</div>
+
+<div class="panel">
+    <div class="row">
+        <div>
+            <label>Origin node</label>
+            <input id="originNodeId" type="text" value="device-3">
+        </div>
+        <div>
+            <label>TTL</label>
+            <input id="ttl" type="number" value="6">
+        </div>
+        <div>
+            <label>Sender</label>
+            <input id="sender" type="text" value="alice@upi">
+        </div>
+        <div>
+            <label>Receiver</label>
+            <input id="receiver" type="text" value="bob@upi">
+        </div>
+        <div>
+            <label>Amount</label>
+            <input id="amount" type="text" value="100">
+        </div>
+        <button onclick="runSimulation()">Simulate</button>
+    </div>
+    <div id="result"></div>
+</div>
+
+<svg id="graph" width="700" height="520"></svg>
+
+<script>
+    let currentNodes = [];
+    let nodePositions = {};
+
+    async function buildTopology() {
+      const deviceCount = document.getElementById('deviceCount').value;
+      const avgConnections = document.getElementById('avgConnections').value;
+
+      await fetch(`/api/mesh/topology?deviceCount=${deviceCount}&avgConnections=${avgConnections}`, { method: 'POST' });
+
+      const nodesRes = await fetch('/api/mesh/nodes');
+      currentNodes = await nodesRes.json();
+
+      document.getElementById('nodeList').innerText = 'Nodes: ' + currentNodes.join(', ');
+
+      drawGraph(currentNodes, [], null);
+    }
+
+    async function runSimulation() {
+      const originNodeId = document.getElementById('originNodeId').value;
+      const ttl = document.getElementById('ttl').value;
+      const sender = document.getElementById('sender').value;
+      const receiver = document.getElementById('receiver').value;
+      const amount = document.getElementById('amount').value;
+
+      const url = `/api/mesh/simulate?originNodeId=${originNodeId}&ttl=${ttl}&sender=${sender}&receiver=${receiver}&amount=${amount}`;
+      const res = await fetch(url, { method: 'POST' });
+      const data = await res.json();
+
+      renderResult(data);
+      drawGraph(currentNodes, data.hops, data.status);
+    }
+
+    function renderResult(data) {
+      let html = `<span class="status ${data.status}">${data.status}</span><br><br>`;
+      html += `<b>Hops (${data.hops.length}):</b><br>`;
+      data.hops.forEach(h => {
+        html += `#${h.hopNumber}: ${h.fromNodeId} → ${h.toNodeId} (ttl left: ${h.remainingTtl})<br>`;
+      });
+      if (data.droppedAtNodeId) {
+        html += `<br>Dropped at: ${data.droppedAtNodeId}`;
+      }
+      if (data.ingestionResult) {
+        html += `<br><br><b>Ingestion result:</b> ${data.ingestionResult.outcome}`;
+        if (data.ingestionResult.transactionId) {
+          html += ` (txn #${data.ingestionResult.transactionId})`;
+        }
+      }
+      document.getElementById('result').innerHTML = html;
+    }
+
+    function drawGraph(nodeIds, hops, status) {
+      const svg = document.getElementById('graph');
+      svg.innerHTML = '';
+
+      const centerX = 350, centerY = 260, radius = 200;
+      nodePositions = {};
+
+      nodeIds.forEach((id, i) => {
+        const angle = (2 * Math.PI * i) / nodeIds.length;
+        nodePositions[id] = {
+          x: centerX + radius * Math.cos(angle),
+          y: centerY + radius * Math.sin(angle)
+        };
+      });
+
+      // draw base edges (faint) — we don't have full edge list from API, so skip unless hops exist
+      // draw hop path edges (bold, colored)
+      const hopColor = status === 'DELIVERED' ? '#6fe08a' : '#ff8a8a';
+      hops.forEach(h => {
+        const from = nodePositions[h.fromNodeId];
+        const to = nodePositions[h.toNodeId];
+        if (!from || !to) return;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', from.x); line.setAttribute('y1', from.y);
+        line.setAttribute('x2', to.x); line.setAttribute('y2', to.y);
+        line.setAttribute('stroke', hopColor);
+        line.setAttribute('stroke-width', '2.5');
+        svg.appendChild(line);
+      });
+
+      // draw nodes
+      nodeIds.forEach(id => {
+        const pos = nodePositions[id];
+        const isGateway = id === 'gateway';
+        const inPath = hops.some(h => h.fromNodeId === id || h.toNodeId === id);
+
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', pos.x); circle.setAttribute('cy', pos.y);
+        circle.setAttribute('r', isGateway ? 14 : 10);
+        circle.setAttribute('fill', isGateway ? '#ffb84f' : (inPath ? hopColor : '#3a3d4a'));
+        circle.setAttribute('stroke', '#0f1117');
+        circle.setAttribute('stroke-width', '2');
+        svg.appendChild(circle);
+
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', pos.x); text.setAttribute('y', pos.y - 16);
+        text.setAttribute('fill', '#ccc');
+        text.setAttribute('font-size', '10');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = id;
+        svg.appendChild(text);
+      });
+    }
+</script>
+
+</body>
+</html>
